@@ -1,0 +1,19 @@
+# 1. Kế thừa từ bản gốc Airflow
+FROM apache/airflow:2.9.0
+
+# 2. Cấp quyền Root (Admin) để cài đặt phần mềm hệ thống
+USER root
+
+# 3. Tải và cài đặt Java (Trái tim của Spark) cùng thư viện đọc tiến trình (procps)
+RUN apt-get update && \
+    apt-get install -y default-jre procps && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. Cắm mốc định vị biến môi trường cho Java
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+# 5. Quay trở lại quyền user mặc định của Airflow cho an toàn
+USER airflow
+
+# 6. Cài thẳng PySpark vào hệ thống
+RUN pip install --no-cache-dir pyspark==3.5.0

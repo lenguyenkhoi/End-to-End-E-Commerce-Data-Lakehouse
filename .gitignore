@@ -1,0 +1,11 @@
+# GCP Credentials
+3_spark_processing/config/gcp_service_account.json
+*.json
+*.pem
+
+# Python & Spark environments
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+4_checkpoints/
+/tmp/

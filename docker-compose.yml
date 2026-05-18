@@ -1,0 +1,169 @@
+services:
+  # ==========================================
+  # HẠ TẦNG GỐC (GIỮ NGUYÊN)
+  # ==========================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: ecom_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - ecom_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: ecom_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - ecom_network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ecom_kafka_ui
+    ports:
+      - "8090:8080"
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - ecom_network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: ecom_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ecom_user
+      POSTGRES_PASSWORD: ecom_password
+      POSTGRES_DB: ecommerce_db
+    volumes:
+      - ./2_database_init/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      - ecom_postgres_data:/var/lib/postgresql/data
+    networks:
+      - ecom_network
+
+  ecommerce_web:
+    build: ./1_streamlit_app
+    container_name: ecom_web_app
+    ports:
+      - "8501:8501"
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      KAFKA_SERVER: "kafka:29092"
+      DB_HOST: "postgres"
+      DB_NAME: "ecommerce_db"
+      DB_USER: "ecom_user"
+      DB_PASS: "ecom_password"
+    volumes:
+      - ./1_streamlit_app:/app
+    networks:
+      - ecom_network
+
+  # ==========================================
+  # SPARK STREAMING WORKER — ĐÃ SỬA
+  # ==========================================
+  spark_streaming_worker:
+    build:
+      context: ./3_spark_processing
+      # Đổi sang Dockerfile mới — pre-bake JARs vào image
+      dockerfile: Dockerfile
+    container_name: spark_streamer
+    depends_on:
+      - kafka
+    environment:
+      # GCP credentials path — phải khớp với GCP_KEY_PATH trong spark_streaming.py
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/3_spark_processing/config/gcp_service_account.json"
+    volumes:
+      - ./:/app
+    # ──────────────────────────────────────────────────────────
+    # FIX CHÍNH: Bỏ --packages khỏi command
+    #
+    # --packages trong docker-compose command OVERRIDE toàn bộ
+    # spark.jars / spark.jars.packages đã set trong Python file.
+    # Vì JARs đã được pre-bake vào image (trong Dockerfile),
+    # spark-submit KHÔNG cần --packages nữa.
+    #
+    # Kafka JAR vẫn giữ qua --packages vì nó không cần system
+    # classloader — Spark's DataSource API tự quản lý nó.
+    # ──────────────────────────────────────────────────────────
+    command: >
+      spark-submit
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.spark:spark-avro_2.12:3.5.0
+      --conf spark.driver.host=127.0.0.1
+      --conf spark.driver.bindAddress=127.0.0.1
+      --conf spark.sql.shuffle.partitions=4
+      /app/3_spark_processing/job/spark_streaming.py
+    restart: on-failure
+    networks:
+      - ecom_network
+
+  # ==========================================
+  # AIRFLOW (GIỮ NGUYÊN)
+  # ==========================================
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow_webserver
+    depends_on:
+      - postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./:/app
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://ecom_user:ecom_password@postgres/ecommerce_db
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - _AIRFLOW_DB_MIGRATE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=airflow
+      - _AIRFLOW_WWW_USER_PASSWORD=airflow
+      - AIRFLOW__WEBSERVER__SECRET_KEY=khoi_data_engineer_secret_key_2026
+    ports:
+      - "8080:8080"
+    command: webserver
+    networks:
+      - ecom_network
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow_scheduler
+    depends_on:
+      - postgres
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./:/app
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://ecom_user:ecom_password@postgres/ecommerce_db
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__WEBSERVER__SECRET_KEY=khoi_data_engineer_secret_key_2026
+    command: scheduler
+    networks:
+      - ecom_network
+
+networks:
+  ecom_network:
+    driver: bridge
+
+volumes:
+  ecom_postgres_data:
