@@ -1,6 +1,6 @@
 # 🛒 End-to-End E-Commerce Data Lakehouse (Medallion Architecture)
 
-![Architecture Diagram](end-to-end-ecommerce\flow\flow_lakehouse.drawio.png)
+![Architecture Diagram](flow/flow_lakehouse.drawio.png)
 
 ## 📌 Project Overview
 This project demonstrates a robust, enterprise-grade End-to-End Data Engineering pipeline for an E-commerce platform. It seamlessly integrates **Real-time Streaming** and **Batch Processing** to ingest, process, and serve data using the **Medallion Data Lakehouse Architecture (Bronze -> Silver -> Gold)** on Google BigQuery.
