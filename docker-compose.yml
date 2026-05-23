@@ -161,6 +161,38 @@ services:
     networks:
       - ecom_network
 
+  # ==========================================
+  # ANALYTICS DASHBOARD (MỚI THÊM)
+  # ==========================================
+  analytics_dashboard:
+    build:
+      context: ./streamlit_dashboard
+      dockerfile: Dockerfile
+    container_name: ecom_analytics_dashboard
+    ports:
+      - "8502:8502"
+    depends_on:
+      - postgres
+      - kafka
+    environment:
+      # Lấy từ file .env
+      GCP_PROJECT_ID: "${GCP_PROJECT_ID}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      # GCP project & credentials — khớp với dashboard.py
+      GOOGLE_APPLICATION_CREDENTIALS: "/app/config/gcp_service_account.json"
+      # Streamlit server settings
+      STREAMLIT_SERVER_PORT: "8502"
+      STREAMLIT_SERVER_ADDRESS: "0.0.0.0"
+      STREAMLIT_SERVER_HEADLESS: "true"
+    volumes:
+      # Mount toàn bộ thư mục dashboard (hot-reload khi sửa code)
+      - ./streamlit_dashboard:/app
+      # Mount GCP key từ spark config — dùng chung, không cần copy
+      - ./3_spark_processing/config:/app/config:ro
+    restart: on-failure
+    networks:
+      - ecom_network
+
 networks:
   ecom_network:
     driver: bridge

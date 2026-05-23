@@ -9,3 +9,7 @@ __pycache__/
 .ipynb_checkpoints/
 4_checkpoints/
 /tmp/
+
+# env files
+.env
+

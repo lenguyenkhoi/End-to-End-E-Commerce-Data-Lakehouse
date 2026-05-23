@@ -82,6 +82,7 @@ def get_kafka_producer():
 # DATA FETCHING
 # ══════════════════════════════════════════════════════════════════
 def get_all_products():
+    """Lấy danh sách sản phẩm đang hoạt động, kết hợp thông tin tồn kho để hiển thị tag "Sắp hết hàng" hoặc "Bán chạy"."""   
     try:
         conn = init_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -170,8 +171,20 @@ TOPIC_REVIEW    = "ecommerce.review"
 
 def _build_event(event_type: str, payload: dict, override_ts: str = None,
                  override_user: dict = None, override_session: str = None) -> dict:
-    """Tạo envelope chuẩn cho mọi Kafka event."""
+    """Tạo envelope chuẩn cho mọi Kafka event.
+    
+    FIX: Always include location, device_type, os in every event envelope.
+    Previously these were only added by send_sim (simulation path), meaning
+    live send_kafka_event calls produced NULL for those columns in BigQuery.
+    Now _build_event injects them from session state / user dict so the
+    streaming schema always gets non-null values.
+    """
     user = override_user or (st.session_state.user if st.session_state.logged_in else None)
+    # Pop context fields from payload if caller already set them (e.g. send_sim),
+    # otherwise fall back to session-state / user data.
+    location    = payload.pop("location",    user.get("location", "unknown") if user else "unknown")
+    device_type = payload.pop("device_type", "unknown")
+    os_name     = payload.pop("os",          "unknown")
     return {
         "event_id":    str(uuid.uuid4()),
         "event_type":  event_type,
@@ -179,6 +192,9 @@ def _build_event(event_type: str, payload: dict, override_ts: str = None,
         "session_id":  override_session or st.session_state.get("session_id", ""),
         "user_id":     user["user_id"] if user else "anonymous",
         "user_name":   user.get("name", "") if user else "",
+        "location":    location,
+        "device_type": device_type,
+        "os":          os_name,
         **payload,
     }
 
@@ -188,6 +204,9 @@ def send_kafka_event(topic: str, event_type: str, payload: dict,
     producer = get_kafka_producer()
     if not producer:
         return
+    # TỰ ĐỘNG ĐIỀN PAGE_NAME DỰA VÀO TRANG NGƯỜI DÙNG ĐANG ĐỨNG
+    if topic == TOPIC_PAGE_VIEW and "page_name" not in payload:
+        payload["page_name"] = st.session_state.get("page", "unknown")
     event = _build_event(event_type, payload, override_ts, override_user, override_session)
     try:
         producer.send(topic, value=event)
@@ -306,23 +325,58 @@ def add_to_cart(product_id):
             "new_quantity": prev_qty + 1,
         })
 
+# def remove_from_cart(product_id):
+#     if product_id in st.session_state.cart:
+#         del st.session_state.cart[product_id]
+#         send_kafka_event(TOPIC_CART, "item_removed", {"product_id": product_id})
+
 def remove_from_cart(product_id):
     if product_id in st.session_state.cart:
+        old_qty = st.session_state.cart[product_id]
         del st.session_state.cart[product_id]
-        send_kafka_event(TOPIC_CART, "item_removed", {"product_id": product_id})
+        p = next((x for x in PRODUCTS if x["id"] == product_id), None)
+        if p:
+            send_kafka_event(TOPIC_CART, "item_removed", {
+                "product_id": product_id,
+                "product_name": p["name"],
+                "brand": p["brand"],
+                "category": p["category"],
+                "unit_price": p["price"],
+                "old_quantity": old_qty,
+                "new_quantity": 0,
+                "quantity": -old_qty,
+                "cart_quantity_after": 0,
+            })
+
+# def update_cart_qty(product_id, new_qty):
+#     old_qty = st.session_state.cart.get(product_id, 0)
+#     st.session_state.cart[product_id] = new_qty
+#     p = next((x for x in PRODUCTS if x["id"] == product_id), None)
+#     send_kafka_event(TOPIC_CART, "item_qty_updated", {
+#         "product_id": product_id, 
+#         "old_quantity": old_qty, 
+#         "new_quantity": new_qty,
+#         "quantity": new_qty - old_qty,
+#         "cart_quantity_after": new_qty,
+#     })
 
 def update_cart_qty(product_id, new_qty):
     old_qty = st.session_state.cart.get(product_id, 0)
     st.session_state.cart[product_id] = new_qty
     p = next((x for x in PRODUCTS if x["id"] == product_id), None)
-    send_kafka_event(TOPIC_CART, "item_qty_updated", {
-        "product_id": product_id, 
-        "old_quantity": old_qty, 
-        "new_quantity": new_qty,
-        "quantity": new_qty - old_qty,
-        "cart_quantity_after": new_qty,
-    })
-
+    if p:
+        send_kafka_event(TOPIC_CART, "item_qty_updated", {
+            "product_id": product_id,
+            "product_name": p["name"],
+            "brand": p["brand"],
+            "category": p["category"],
+            "unit_price": p["price"],
+            "old_quantity": old_qty, 
+            "new_quantity": new_qty,
+            "quantity": new_qty - old_qty,
+            "cart_quantity_after": new_qty,
+        })
+        
 # ══════════════════════════════════════════════════════════════════
 # PROMO
 # ══════════════════════════════════════════════════════════════════
@@ -554,11 +608,11 @@ def auto_restock(threshold=15, restock_amount=50):
                     "INSERT INTO inventory_logs (product_id, transaction_type, quantity_changed, note) VALUES (%s, 'IN', %s, 'Restock')",
                     (pid, restock_amount)
                 )
-                send_kafka_event(TOPIC_INVENTORY, "restock", {
+                send_kafka_event(TOPIC_INVENTORY, "restock_auto", {
                     "product_id": pid,
-                    "product_name": p_name,             # <-- THÊM MỚI
+                    "product_name": p_name,             
                     "quantity_added": restock_amount,
-                    "stock_remaining": new_stock,       # <-- THÊM MỚI
+                    "stock_remaining": new_stock,      
                 })
                 restocked_count += 1
         conn.commit()
@@ -660,6 +714,14 @@ def simulate_traffic(num_users: int):
 
         def send_sim(topic: str, event_type: str, payload: dict, ts: str = user_reg_str):
             """Helper: gửi event với timestamp lịch sử."""
+            # 🌟 TỰ ĐỘNG PHÂN TÍCH VÀ ĐIỀN PAGE_NAME CHO SIMULATOR
+            if topic == TOPIC_PAGE_VIEW and "page_name" not in payload:
+                if event_type == "product_viewed":
+                    payload["page_name"] = "product_detail"
+                elif event_type in ["search_performed", "category_filtered"]:
+                    payload["page_name"] = "products"
+                else:
+                    payload["page_name"] = "home"
             event = {
                 "event_id":   str(uuid.uuid4()),
                 "event_type": event_type,
@@ -690,26 +752,73 @@ def simulate_traffic(num_users: int):
         send_sim(TOPIC_USER, "user_registered", {"username": username, "gender": gender})
 
         # ── 3. KAFKA: Page Views & Search ─────────────────────────
-        send_sim(TOPIC_PAGE_VIEW, "page_viewed", {"page_name": "home"})
+        # send_sim(TOPIC_PAGE_VIEW, "page_viewed", {"page_name": "home"})
 
+        # if random.random() < 0.6:   # 60% khách tìm kiếm
+        #     search_term = random.choice(SEARCH_TERMS)
+        #     send_sim(TOPIC_PAGE_VIEW, "search_performed", {
+        #         "search_term": search_term,
+        #         "results_count": random.randint(3, 15),
+        #     })
+
+        # # Browse một vài sản phẩm
+        # browsed = random.sample(current_products, min(random.randint(2, 5), len(current_products)))
+        # for bp in browsed:
+        #     send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
+        #         "product_id": bp["id"], "product_name": bp["name"],
+        #         "category": bp["category"], "brand": bp["brand"], "price": bp["price"],
+        #     })
+
+        # if random.random() < 0.5:
+        #     cat = random.choice(CATEGORIES[1:]) if len(CATEGORIES) > 1 else "Smartphone"
+        #     send_sim(TOPIC_PAGE_VIEW, "category_filtered", {"category": cat})
+        
+        # ── 3. KAFKA: Page Views & Search (FULL USER JOURNEY) ─────────
+        
+        # 3.1. Khách truy cập vào trang chủ
+        send_sim(TOPIC_PAGE_VIEW, "page_viewed", {
+            "page_name": "home",
+            "trigger": "direct_visit"
+        }, ts=user_reg_str)
+
+        # 3.2. Khách thực hiện tìm kiếm hoặc lọc danh mục
         if random.random() < 0.6:   # 60% khách tìm kiếm
             search_term = random.choice(SEARCH_TERMS)
             send_sim(TOPIC_PAGE_VIEW, "search_performed", {
+                "page_name": "search_results",
                 "search_term": search_term,
                 "results_count": random.randint(3, 15),
-            })
-
-        # Browse một vài sản phẩm
-        browsed = random.sample(current_products, min(random.randint(2, 5), len(current_products)))
-        for bp in browsed:
-            send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
-                "product_id": bp["id"], "product_name": bp["name"],
-                "category": bp["category"], "brand": bp["brand"], "price": bp["price"],
-            })
-
-        if random.random() < 0.5:
+                "trigger": "search_bar"
+            }, ts=user_reg_str)
+        elif random.random() < 0.5: # Hoặc dùng bộ lọc danh mục
             cat = random.choice(CATEGORIES[1:]) if len(CATEGORIES) > 1 else "Smartphone"
-            send_sim(TOPIC_PAGE_VIEW, "category_filtered", {"category": cat})
+            send_sim(TOPIC_PAGE_VIEW, "category_filtered", {
+                "page_name": "category_list",
+                "category": cat,
+                "trigger": "sidebar_filter"
+            }, ts=user_reg_str)
+
+        # 3.3. Khách lướt xem chi tiết nhiều sản phẩm
+        browsed = random.sample(current_products, min(random.randint(5, 12), len(current_products)))
+        for bp in browsed:
+            # Random thêm vài giây/phút để thời gian xem trông thật hơn
+            view_ts = (user_reg_dt + timedelta(seconds=random.randint(10, 300))).strftime('%Y-%m-%d %H:%M:%S')
+            send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
+                "page_name": "product_detail",
+                "product_id": bp["id"], 
+                "product_name": bp["name"],
+                "category": bp["category"], 
+                "brand": bp["brand"], 
+                "price": bp["price"],
+                "trigger": "click_product_card"
+            }, ts=view_ts)
+
+        # 3.4. Khách bấm vào xem giỏ hàng trước khi mua
+        cart_view_ts = (user_reg_dt + timedelta(minutes=random.randint(5, 10))).strftime('%Y-%m-%d %H:%M:%S')
+        send_sim(TOPIC_PAGE_VIEW, "page_viewed", {
+            "page_name": "cart",
+            "trigger": "click_cart_icon"
+        }, ts=cart_view_ts)
 
         # ── 4. CHỌN SẢN PHẨM ĐỂ MUA ─────────────────────────────
         num_items = random.randint(1, 3)
@@ -757,6 +866,13 @@ def simulate_traffic(num_users: int):
                             "cart_quantity_after": actual_qty,                 
                             "old_quantity": 0,                                 
                             "new_quantity": actual_qty,
+                        }, ts=order_str)
+                        # KAFKA: page_view (add_to_cart trigger)
+                        send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
+                            "page_name": "product_detail",
+                            "product_id": p["id"], "product_name": p["name"],
+                            "category": p["category"], "brand": p["brand"], "price": p["price"],
+                            "trigger": "add_to_cart",
                         }, ts=order_str)
 
                 if not items_to_buy:
@@ -852,12 +968,29 @@ def simulate_traffic(num_users: int):
             paid_dt  = order_dt + timedelta(minutes=random.randint(1, 30))
             paid_str = paid_dt.strftime('%Y-%m-%d %H:%M:%S')
             send_sim(TOPIC_ORDER, "order_paid", {
-                "order_id": order_id, "payment_method": payment, "total_amount": total_amount,
+                "order_id":       order_id,
+                "payment_method": payment,
+                "order_status":   order_status,
+                "subtotal":       subtotal,
+                "shipping_fee":   shipping_fee,
+                "discount_amount": discount_amount,
+                "total_amount":   total_amount,
+                "promo_id":       promo["promo_id"] if promo else None,     
+                "promo_code":     promo["promo_code"] if promo else None,
             }, ts=paid_str)
 
         if order_status == 'Cancelled':
             send_sim(TOPIC_ORDER, "order_cancelled", {
-                "order_id": order_id, "reason": random.choice(["Changed mind", "Found cheaper", "Wrong item"]),
+                "order_id":       order_id,
+                "payment_method": payment,
+                "order_status":   "Cancelled",
+                "subtotal":       subtotal,
+                "shipping_fee":   shipping_fee,
+                "discount_amount": discount_amount,
+                "total_amount":   total_amount,
+                "promo_id":       promo["promo_id"] if promo else None,     
+                "promo_code":     promo["promo_code"] if promo else None,
+                "reason":         random.choice(["Changed mind", "Found cheaper", "Wrong item"]),
             }, ts=order_str)
 
         # ── 6. KAFKA: Returned orders + inventory_log RETURN ──────
@@ -868,10 +1001,16 @@ def simulate_traffic(num_users: int):
             return_qty  = random.randint(1, return_item["quantity"])
 
             send_sim(TOPIC_ORDER, "order_returned", {
-                "order_id": order_id,
-                "product_id": return_item["product_id"],
+                "order_id":          order_id,
+                "product_id":        return_item["product_id"],
                 "quantity_returned": return_qty,
-                "reason": random.choice(["Defective", "Wrong size", "Not as described", "Changed mind"]),
+                "payment_method":    payment,
+                "order_status":      "Returned",
+                "subtotal":          subtotal,
+                "shipping_fee":      shipping_fee,
+                "discount_amount":   discount_amount,
+                "total_amount":      total_amount,
+                "reason":            random.choice(["Defective", "Wrong size", "Not as described", "Changed mind"]),
             }, ts=return_str)
 
             try:
@@ -931,6 +1070,390 @@ def simulate_traffic(num_users: int):
     producer.flush(timeout=5.0)
     return True
 
+
+def simulate_realtime_traffic(num_users: int):
+    """
+    Giả lập dữ liệu thời gian thực (Real-time).
+    Tất cả timestamp đều diễn ra xung quanh thời điểm NGAY BÂY GIỜ.
+    """
+    conn = init_connection()
+    producer = get_kafka_producer()
+    if not producer or not conn:
+        return False
+
+    VN_LAST_NAMES = ['Nguyễn', 'Trần', 'Lê', 'Phạm', 'Hoàng', 'Huỳnh', 'Phan', 'Vũ', 'Võ', 'Đặng', 'Bùi', 'Đỗ', 'Hồ', 'Ngô', 'Dương', 'Lý']
+    VN_MIDDLE_NAMES = ['Văn', 'Thị', 'Hữu', 'Ngọc', 'Minh', 'Thanh', 'Gia', 'Bảo', 'Hoài', 'Xuân', 'Thu', 'Đức', 'Tài', 'Thành']
+    VN_FIRST_NAMES = ['Anh', 'Tuấn', 'Hùng', 'Dũng', 'Linh', 'Lan', 'Trang', 'Hương', 'Hà', 'Khang', 'Khôi', 'Phúc', 'Tâm', 'An', 'Bình', 'Hân', 'Thảo', 'Nhi']
+    VN_PROVINCES = ['Hà Nội', 'TP. Hồ Chí Minh', 'Đà Nẵng', 'Hải Phòng', 'Cần Thơ', 'Đồng Nai', 'Bình Dương', 'Bà Rịa - Vũng Tàu', 'Khánh Hòa', 'Lâm Đồng', 'Thừa Thiên Huế', 'Quảng Ninh', 'Nghệ An', 'Thanh Hóa', 'Bắc Ninh', 'Cà Mau', 'Kiên Giang']
+    PAYMENT_METHODS = ['COD', 'Credit Card', 'E-Wallet', 'Bank Transfer']
+    DEVICES = ['Mobile', 'Desktop', 'Tablet']
+    OS_LIST = ['iOS', 'Android', 'Windows', 'MacOS']
+    SEARCH_TERMS = ['iPhone', 'laptop gaming', 'tai nghe chống ồn', 'Samsung', 'MacBook', 'tablet học online', 'Xiaomi', 'Sony']
+
+    # Lấy toàn bộ promotions hợp lệ để dùng trong sim
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT promo_id, promo_code, discount_percent FROM promotions WHERE is_active = TRUE")
+            all_promos = [dict(r) for r in cur.fetchall()]
+    except:
+        all_promos = []
+
+    current_products = [p for p in PRODUCTS if p.get('stock', 0) > 0]
+    if not current_products:
+        return False
+
+    for _ in range(num_users):
+        # 🌟 REAL-TIME LOGIC: Khách vào web lùi lại từ 0-3 phút so với hiện tại
+        user_reg_dt = datetime.now() - timedelta(minutes=random.randint(0, 3), seconds=random.randint(0, 59))
+        user_reg_str = user_reg_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # ── 1. TẠO KHÁCH ẢO ─────────────────────────────────────
+        last_name = random.choice(VN_LAST_NAMES)
+        middle_name = random.choice(VN_MIDDLE_NAMES)
+        first_name = random.choice(VN_FIRST_NAMES)
+        full_name = f"{last_name} {middle_name} {first_name}"
+        clean_name = remove_accents(f"{first_name}{last_name}").lower().replace(" ", "")
+        username = f"{clean_name}{random.randint(10, 9999)}"
+        email = f"{username}@gmail.com"
+        password = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+        sim_user_id = f"U{uuid.uuid4().hex[:6].upper()}"
+        phone       = f"09{random.randint(10000000, 99999999)}"
+        gender      = random.choice(['Male', 'Female'])
+        location    = random.choice(VN_PROVINCES)
+        session_id  = str(uuid.uuid4())
+        device      = random.choice(DEVICES)
+        os_sys      = random.choice(OS_LIST)
+
+        sim_user_obj = {"user_id": sim_user_id, "name": full_name}
+
+        def send_sim(topic: str, event_type: str, payload: dict, ts: str = user_reg_str):
+            if topic == TOPIC_PAGE_VIEW and "page_name" not in payload:
+                if event_type == "product_viewed":
+                    payload["page_name"] = "product_detail"
+                elif event_type in ["search_performed", "category_filtered"]:
+                    payload["page_name"] = "products"
+                else:
+                    payload["page_name"] = "home"
+            event = {
+                "event_id":   str(uuid.uuid4()),
+                "event_type": event_type,
+                "timestamp":  ts,
+                "session_id": session_id,
+                "user_id":    sim_user_id,
+                "user_name":  full_name,
+                "location":   location,
+                "device_type": device,
+                "os":          os_sys,
+                **payload,
+            }
+            producer.send(topic, value=event)
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users
+                        (user_id, username, password, full_name, email, phone, gender, location, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (sim_user_id, username, "sim123", full_name, email, phone, gender, location, user_reg_str))
+            conn.commit()
+        except:
+            conn.rollback()
+            continue
+
+        # ── 2. KAFKA: User Registered ─────────────────────────────
+        send_sim(TOPIC_USER, "user_registered", {"username": username, "gender": gender})
+
+        # ── 3. KAFKA: Page Views & Search (FULL USER JOURNEY) ─────────
+        send_sim(TOPIC_PAGE_VIEW, "page_viewed", {
+            "page_name": "home",
+            "trigger": "direct_visit"
+        }, ts=user_reg_str)
+
+        if random.random() < 0.6:
+            search_term = random.choice(SEARCH_TERMS)
+            send_sim(TOPIC_PAGE_VIEW, "search_performed", {
+                "page_name": "search_results",
+                "search_term": search_term,
+                "results_count": random.randint(3, 15),
+                "trigger": "search_bar"
+            }, ts=user_reg_str)
+        elif random.random() < 0.5:
+            cat = random.choice(CATEGORIES[1:]) if len(CATEGORIES) > 1 else "Smartphone"
+            send_sim(TOPIC_PAGE_VIEW, "category_filtered", {
+                "page_name": "category_list",
+                "category": cat,
+                "trigger": "sidebar_filter"
+            }, ts=user_reg_str)
+
+        browsed = random.sample(current_products, min(random.randint(5, 12), len(current_products)))
+        for bp in browsed:
+            # 🌟 REAL-TIME LOGIC: Xem sản phẩm sau vài giây
+            view_ts = (user_reg_dt + timedelta(seconds=random.randint(5, 60))).strftime('%Y-%m-%d %H:%M:%S')
+            send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
+                "page_name": "product_detail",
+                "product_id": bp["id"], 
+                "product_name": bp["name"],
+                "category": bp["category"], 
+                "brand": bp["brand"], 
+                "price": bp["price"],
+                "trigger": "click_product_card"
+            }, ts=view_ts)
+
+        # 🌟 REAL-TIME LOGIC: Vào giỏ hàng sau vài chục giây
+        cart_view_ts = (user_reg_dt + timedelta(seconds=random.randint(30, 90))).strftime('%Y-%m-%d %H:%M:%S')
+        send_sim(TOPIC_PAGE_VIEW, "page_viewed", {
+            "page_name": "cart",
+            "trigger": "click_cart_icon"
+        }, ts=cart_view_ts)
+
+        # ── 4. CHỌN SẢN PHẨM ĐỂ MUA ─────────────────────────────
+        num_items = random.randint(1, 3)
+        chosen_products = random.sample(current_products, min(num_items, len(current_products)))
+
+        # 🌟 REAL-TIME LOGIC: Đặt hàng diễn ra nhanh trong 1 đến 3 phút
+        order_offset_seconds = random.randint(30, 180)
+        order_dt  = user_reg_dt + timedelta(seconds=order_offset_seconds)
+        order_str = order_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        order_id = f"ORD_{uuid.uuid4().hex[:8].upper()}"
+        subtotal = 0
+        db_success = False
+
+        promo = random.choice(all_promos) if all_promos and random.random() < 0.30 else None
+        if promo:
+            send_sim(TOPIC_PROMO, "promo_applied", {
+                "promo_id": promo["promo_id"],
+                "promo_code": promo["promo_code"],
+                "discount_percent": float(promo["discount_percent"]),
+            }, ts=order_str)
+
+        try:
+            with conn.cursor() as cur:
+                items_to_buy = []
+                for p in chosen_products:
+                    cur.execute("SELECT stock_quantity FROM inventory WHERE product_id = %s FOR UPDATE", (p["id"],))
+                    res = cur.fetchone()
+                    if res and res[0] > 0:
+                        actual_qty = min(random.randint(1, 2), res[0])
+                        item_total = p["price"] * actual_qty
+                        items_to_buy.append({
+                            "id": p["id"], "name": p["name"], "price": p["price"],
+                            "cost": p["cost"], "qty": actual_qty, "item_total": item_total,
+                            "brand": p["brand"], "category": p["category"],
+                        })
+                        subtotal += item_total
+
+                        send_sim(TOPIC_CART, "item_added", {
+                            "product_id": p["id"], "product_name": p["name"],
+                            "brand": p["brand"], "category": p["category"],
+                            "unit_price": p["price"], "quantity": actual_qty,
+                            "cart_quantity_after": actual_qty,                 
+                            "old_quantity": 0,                                 
+                            "new_quantity": actual_qty,
+                        }, ts=order_str)
+
+                        send_sim(TOPIC_PAGE_VIEW, "product_viewed", {
+                            "page_name": "product_detail",
+                            "product_id": p["id"], "product_name": p["name"],
+                            "category": p["category"], "brand": p["brand"], "price": p["price"],
+                            "trigger": "add_to_cart",
+                        }, ts=order_str)
+
+                if not items_to_buy:
+                    conn.rollback()
+                    continue
+
+                shipping_fee    = random.choice([0, 15000, 30000])
+                discount_amount = int(subtotal * promo["discount_percent"] / 100) if promo else 0
+                total_amount    = subtotal - discount_amount + shipping_fee
+                payment         = random.choice(PAYMENT_METHODS)
+
+                order_status = random.choices(
+                    ['Delivered', 'Processing', 'Pending', 'Cancelled', 'Returned'],
+                    weights=[70, 10, 10, 5, 5]
+                )[0]
+
+                cur.execute("""
+                    INSERT INTO orders
+                        (order_id, user_id, promo_id, subtotal, shipping_fee,
+                         discount_amount, total_amount, payment_method, order_status,
+                         order_date, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (order_id, sim_user_id, promo["promo_id"] if promo else None,
+                      subtotal, shipping_fee, discount_amount, total_amount,
+                      payment, order_status, order_str, order_str))
+
+                kafka_items = []
+                for item in items_to_buy:
+                    cur.execute("""
+                        INSERT INTO order_items
+                            (order_id, product_id, quantity, unit_price, unit_cost, item_total)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (order_id, item["id"], item["qty"], item["price"], item["cost"], item["item_total"]))
+
+                    cur.execute(
+                        "UPDATE inventory SET stock_quantity = stock_quantity - %s WHERE product_id = %s",
+                        (item["qty"], item["id"])
+                    )
+                    cur.execute("""
+                        INSERT INTO inventory_logs
+                            (product_id, order_id, transaction_type, quantity_changed, created_at, note)
+                        VALUES (%s, %s, 'OUT', %s, %s, 'Sell')
+                    """, (item["id"], order_id, item["qty"], order_str))
+
+                    cur.execute("SELECT stock_quantity FROM inventory WHERE product_id = %s", (item["id"],))
+                    new_stock = cur.fetchone()[0]
+                    if new_stock < 10:
+                        send_sim(TOPIC_INVENTORY, "low_stock_alert", {
+                            "product_id": item["id"], "product_name": item["name"],
+                            "stock_remaining": new_stock,
+                        }, ts=order_str)
+
+                    kafka_items.append({
+                        "product_id": item["id"], "product_name": item["name"],
+                        "quantity": item["qty"], "unit_price": item["price"],
+                        "unit_cost": item["cost"],
+                    })
+
+                    send_sim(TOPIC_INVENTORY, "stock_updated_out", {
+                        "product_id": item["id"], "product_name": item["name"],
+                        "quantity_sold": item["qty"],
+                        "order_id": order_id,
+                        "stock_remaining": new_stock,
+                    }, ts=order_str)
+
+            conn.commit()
+            db_success = True
+
+        except Exception:
+            conn.rollback()
+            db_success = False
+
+        if not db_success:
+            continue
+
+        # ── 5. KAFKA: Order Events ────────────────────────────────
+        send_sim(TOPIC_ORDER, "order_created", {
+            "order_id":       order_id,
+            "subtotal":       subtotal,
+            "shipping_fee":   shipping_fee,
+            "discount_amount": discount_amount,
+            "total_amount":   total_amount,
+            "payment_method": payment,
+            "promo_id":       promo["promo_id"] if promo else None,
+            "promo_code":     promo["promo_code"] if promo else None,
+            "order_status":   order_status,
+            "items":          kafka_items,
+        }, ts=order_str)
+
+        if order_status not in ('Cancelled', 'Pending'):
+            # 🌟 REAL-TIME LOGIC: Thanh toán ngay sau 10 đến 45 giây
+            paid_dt  = order_dt + timedelta(seconds=random.randint(10, 45))
+            paid_str = paid_dt.strftime('%Y-%m-%d %H:%M:%S')
+            send_sim(TOPIC_ORDER, "order_paid", {
+                "order_id":       order_id,
+                "payment_method": payment,
+                "order_status":   order_status,
+                "subtotal":       subtotal,
+                "shipping_fee":   shipping_fee,
+                "discount_amount": discount_amount,
+                "total_amount":   total_amount,
+                "promo_id":       promo["promo_id"] if promo else None,     
+                "promo_code":     promo["promo_code"] if promo else None,
+            }, ts=paid_str)
+
+        if order_status == 'Cancelled':
+            send_sim(TOPIC_ORDER, "order_cancelled", {
+                "order_id":       order_id,
+                "payment_method": payment,
+                "order_status":   "Cancelled",
+                "subtotal":       subtotal,
+                "shipping_fee":   shipping_fee,
+                "discount_amount": discount_amount,
+                "total_amount":   total_amount,
+                "promo_id":       promo["promo_id"] if promo else None,     
+                "promo_code":     promo["promo_code"] if promo else None,
+                "reason":         random.choice(["Changed mind", "Found cheaper", "Wrong item"]),
+            }, ts=order_str)
+
+        # ── 6. KAFKA: Returned orders + inventory_log RETURN ──────
+        if order_status == 'Returned':
+            # 🌟 REAL-TIME LOGIC: Hoàn hàng sau 1 đến 5 phút
+            return_dt  = order_dt + timedelta(minutes=random.randint(1, 5))
+            return_str = return_dt.strftime('%Y-%m-%d %H:%M:%S')
+            return_item = random.choice(kafka_items)
+            return_qty  = random.randint(1, return_item["quantity"])
+
+            send_sim(TOPIC_ORDER, "order_returned", {
+                "order_id":          order_id,
+                "product_id":        return_item["product_id"],
+                "quantity_returned": return_qty,
+                "payment_method":    payment,
+                "order_status":      "Returned",
+                "subtotal":          subtotal,
+                "shipping_fee":      shipping_fee,
+                "discount_amount":   discount_amount,
+                "total_amount":      total_amount,
+                "reason":            random.choice(["Defective", "Wrong size", "Not as described", "Changed mind"]),
+            }, ts=return_str)
+
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE inventory SET stock_quantity = stock_quantity + %s WHERE product_id = %s",
+                        (return_qty, return_item["product_id"])
+                    )
+                    cur.execute("""
+                        INSERT INTO inventory_logs
+                            (product_id, order_id, transaction_type, quantity_changed, created_at, note)
+                        VALUES (%s, %s, 'RETURN', %s, %s, 'Return')
+                    """, (return_item["product_id"], order_id, return_qty, return_str))
+                conn.commit()
+
+                cur.execute("SELECT stock_quantity FROM inventory WHERE product_id = %s", (return_item["product_id"],))
+                new_stock_after_return = cur.fetchone()[0]
+
+                send_sim(TOPIC_INVENTORY, "stock_updated_in", {
+                    "product_id": return_item["product_id"],
+                    "product_name": return_item["product_name"],
+                    "quantity_returned": return_qty, "order_id": order_id,
+                    "stock_remaining": new_stock_after_return,
+                }, ts=return_str)
+            except:
+                conn.rollback()
+
+        # ── 7. KAFKA: Reviews (chỉ Delivered) ────────────────────
+        if order_status == 'Delivered' and random.random() < 0.5:
+            for item in kafka_items:
+                rating  = random.choices([1, 2, 3, 4, 5], weights=[3, 5, 12, 40, 40])[0]
+                comment_pool = [
+                    "Sản phẩm tốt, giao hàng nhanh!", "Hàng y mô tả, rất hài lòng.",
+                    "Chất lượng tạm ổn.", "Sẽ mua lại lần sau.", "Đóng gói cẩn thận.",
+                    "Hơi chậm nhưng hàng tốt.", "Không như kỳ vọng lắm.", "Tuyệt vời!",
+                ]
+                comment  = random.choice(comment_pool)
+                # 🌟 REAL-TIME LOGIC: Viết đánh giá sau 2 đến 10 phút
+                review_dt  = order_dt + timedelta(minutes=random.randint(2, 10))
+                review_str = review_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO reviews
+                                (product_id, user_id, rating, comment, review_date)
+                            VALUES (%s, %s, %s, %s, %s)
+                        """, (item["product_id"], sim_user_id, rating, comment, review_str))
+                    conn.commit()
+                    send_sim(TOPIC_REVIEW, "review_submitted", {
+                        "product_id": item["product_id"],
+                        "rating": rating,
+                        "comment_length": len(comment),
+                    }, ts=review_str)
+                except:
+                    conn.rollback()
+
+    producer.flush(timeout=5.0)
+    return True
 # ══════════════════════════════════════════════════════════════════
 # UI COMPONENTS
 # ══════════════════════════════════════════════════════════════════
@@ -1003,15 +1526,39 @@ def render_product_card(p):
     )
     st.markdown(html_content, unsafe_allow_html=True)
 
-    if st.button("Thêm vào giỏ", key=f"atc_{p['id']}", use_container_width=True):
-        add_to_cart(p["id"])
-        # Fire product_viewed event on add-to-cart (user clearly interested)
-        send_kafka_event(TOPIC_PAGE_VIEW, "product_viewed", {
-            "product_id": p["id"], "product_name": p["name"],
-            "category": p["category"], "brand": p["brand"], "price": p["price"],
-            "trigger": "add_to_cart",
-        })
-        st.rerun()
+    # if st.button("Thêm vào giỏ", key=f"atc_{p['id']}", use_container_width=True):
+    #     add_to_cart(p["id"])
+    #     # Fire product_viewed event on add-to-cart (user clearly interested)
+    #     send_kafka_event(TOPIC_PAGE_VIEW, "product_viewed", {
+    #         "product_id": p["id"], "product_name": p["name"],
+    #         "category": p["category"], "brand": p["brand"], "price": p["price"],
+    #         "trigger": "add_to_cart",
+    #     })
+    #     st.rerun()
+    # Bỏ đoạn cũ đi (if st.button("Thêm vào giỏ"...)) và thay bằng đoạn này:
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Xem chi tiết sản phẩm", key=f"view_{p['id']}", use_container_width=True):
+            # Bắn sự kiện xem sản phẩm lên Kafka
+            send_kafka_event(TOPIC_PAGE_VIEW, "product_viewed", {
+                "page_name": "products",
+                "product_id": p["id"], "product_name": p["name"],
+                "category": p["category"], "brand": p["brand"], "price": p["price"],
+                "trigger": "click_view_button",
+            })
+            st.session_state.notification = f"Bạn đang xem thông tin {p['name']}!"
+            st.rerun()
+    with col2:
+        if st.button("🛒 Thêm", key=f"atc_{p['id']}", use_container_width=True):
+            add_to_cart(p["id"])
+            # Vừa thêm vào giỏ vừa ghi nhận là đã xem
+            send_kafka_event(TOPIC_PAGE_VIEW, "product_viewed", {
+                "page_name": "products",
+                "product_id": p["id"], "product_name": p["name"],
+                "category": p["category"], "brand": p["brand"], "price": p["price"],
+                "trigger": "add_to_cart",
+            })
+            st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
 # PAGES
@@ -1030,15 +1577,47 @@ def page_home():
         with cols[i]:
             render_product_card(p)
 
+# def page_products():
+#     st.markdown('<div class="section-heading">Tất Cả Sản Phẩm</div><div class="divider"></div>', unsafe_allow_html=True)
+
+#     # Category filter
+#     selected_cat = st.selectbox("Lọc theo danh mục:", CATEGORIES, label_visibility="collapsed")
+#     filtered = PRODUCTS if selected_cat == "All" else [p for p in PRODUCTS if p["category"] == selected_cat]
+#     if selected_cat != "All":
+#         send_kafka_event(TOPIC_PAGE_VIEW, "category_filtered", {"category": selected_cat})
+
+#     cols = st.columns(4)
+#     for i, p in enumerate(filtered):
+#         with cols[i % 4]:
+#             render_product_card(p)
+
 def page_products():
     st.markdown('<div class="section-heading">Tất Cả Sản Phẩm</div><div class="divider"></div>', unsafe_allow_html=True)
 
-    # Category filter
+    # ── 1. Thanh tìm kiếm ──
+    search_query = st.text_input("🔍 Tìm kiếm sản phẩm:", placeholder="Nhập tên, thương hiệu (VD: iPhone)...")
+    if search_query and search_query != st.session_state.get("last_search", ""):
+        st.session_state.last_search = search_query
+        filtered_by_search = [p for p in PRODUCTS if search_query.lower() in p["name"].lower() or search_query.lower() in p["brand"].lower()]
+        
+        # Bắn sự kiện tìm kiếm lên Kafka
+        send_kafka_event(TOPIC_PAGE_VIEW, "search_performed", {
+            "search_term": search_query,
+            "results_count": len(filtered_by_search)
+        })
+    else:
+        filtered_by_search = PRODUCTS
+
+    # ── 2. Lọc theo danh mục ──
     selected_cat = st.selectbox("Lọc theo danh mục:", CATEGORIES, label_visibility="collapsed")
-    filtered = PRODUCTS if selected_cat == "All" else [p for p in PRODUCTS if p["category"] == selected_cat]
-    if selected_cat != "All":
+    filtered = filtered_by_search if selected_cat == "All" else [p for p in filtered_by_search if p["category"] == selected_cat]
+    
+    if selected_cat != "All" and selected_cat != st.session_state.get("last_category", ""):
+        st.session_state.last_category = selected_cat
+        # Bắn sự kiện lọc danh mục lên Kafka
         send_kafka_event(TOPIC_PAGE_VIEW, "category_filtered", {"category": selected_cat})
 
+    # ── 3. Hiển thị sản phẩm ──
     cols = st.columns(4)
     for i, p in enumerate(filtered):
         with cols[i % 4]:
@@ -1174,13 +1753,38 @@ def page_profile():
         st.markdown('<div class="divider" style="margin-top: 2rem;"></div>', unsafe_allow_html=True)
 
         # ── Simulator ──
-        st.markdown("### 🤖 Công cụ Giả Lập Dữ liệu Lịch sử & Traffic")
+        # st.markdown("### 🤖 Công cụ Giả Lập Dữ liệu Lịch sử & Traffic")
+        # with st.form("simulator_form"):
+        #     sim_qty = st.number_input("Số lượng Khách hàng ảo:", min_value=1, max_value=1000, value=20, step=10)
+        #     if st.form_submit_button("🚀 Bắn Data Lịch sử (100 ngày) lên Kafka & DB", use_container_width=True):
+        #         with st.spinner(f"Đang sinh dữ liệu lịch sử cho {sim_qty} khách hàng..."):
+        #             if simulate_traffic(sim_qty):
+        #                 st.success("✅ HOÀN TẤT! Dữ liệu đã được ghi vào DB và Kafka.")
+        #             else:
+        #                 st.error("Lỗi kết nối Kafka / DB.")
+        
+        st.markdown("### 🤖 Công cụ Giả Lập Dữ liệu")
         with st.form("simulator_form"):
             sim_qty = st.number_input("Số lượng Khách hàng ảo:", min_value=1, max_value=1000, value=20, step=10)
-            if st.form_submit_button("🚀 Bắn Data Lịch sử (100 ngày) lên Kafka & DB", use_container_width=True):
-                with st.spinner(f"Đang sinh dữ liệu lịch sử cho {sim_qty} khách hàng..."):
+            
+            # Giao diện chia 2 cột cho 2 nút bấm
+            col1, col2 = st.columns(2)
+            with col1:
+                btn_history = st.form_submit_button("🕰️ Bắn Data Lịch sử", use_container_width=True)
+            with col2:
+                btn_realtime = st.form_submit_button("🔥 Bắn Data Real-time", use_container_width=True)
+                
+            if btn_history:
+                with st.spinner(f"Đang sinh dữ liệu Lịch sử cho {sim_qty} khách hàng..."):
                     if simulate_traffic(sim_qty):
-                        st.success("✅ HOÀN TẤT! Dữ liệu đã được ghi vào DB và Kafka.")
+                        st.success("✅ HOÀN TẤT! Dữ liệu LỊCH SỬ đã được ghi.")
+                    else:
+                        st.error("Lỗi kết nối Kafka / DB.")
+            
+            if btn_realtime:
+                with st.spinner(f"Đang sinh dữ liệu Real-time cho {sim_qty} khách hàng..."):
+                    if simulate_realtime_traffic(sim_qty):
+                        st.success("✅ HOÀN TẤT! Dữ liệu REAL-TIME đã bay lên Kafka.")
                     else:
                         st.error("Lỗi kết nối Kafka / DB.")
 

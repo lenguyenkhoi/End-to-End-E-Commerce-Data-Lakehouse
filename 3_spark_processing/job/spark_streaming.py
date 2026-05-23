@@ -238,7 +238,7 @@ def bq_append(batch_df: DataFrame, table: str, batch_id: int) -> None:
         print(f"  [{layer}][Batch {batch_id}] {label}: {n:,} dòng")
         batch_df.write \
             .format("bigquery") \
-            .option("table",       table) \
+            .option("table", table) \
             .option("writeMethod", "indirect") \
             .option("intermediateFormat", "avro") \
             .option("useAvroLogicalTypes", "true") \
@@ -447,7 +447,9 @@ def _silver_and_gold(topic: str, good_df: DataFrame, batch_id: int) -> None:
             col("device_type"), col("os"), col("location"),
             col("page_name"), col("product_id"), col("product_name"),
             col("category"), col("brand"), col("price"),
-            col("search_term").alias("search_item"), col("results_count"), col("trigger"),
+            col("search_term").alias("search_item"),
+            col("results_count").alias("result_count"),
+            col("trigger"),
             to_date(col("event_ts")).alias("date_key"),
             col("event_ts"),
             current_timestamp().alias("dw_loaded_at"),
@@ -565,7 +567,8 @@ def _silver_and_gold(topic: str, good_df: DataFrame, batch_id: int) -> None:
             col("payment_method"), col("order_status"),
             col("subtotal"), col("shipping_fee"),
             col("discount_amount"), col("total_amount"),
-            (col("total_amount") - col("shipping_fee")).alias("net_revenue"),
+            # net_revenue: order_paid only sends total_amount (no shipping_fee) → guard with coalesce
+            coalesce(col("total_amount") - col("shipping_fee"), col("total_amount"), lit(0)).cast(IntegerType()).alias("net_revenue"),
             col("reason"),
             when(col("event_type") == "order_created",   True).otherwise(False).alias("is_new_order"),
             when(col("event_type") == "order_cancelled", True).otherwise(False).alias("is_cancelled"),
@@ -683,7 +686,7 @@ def _silver_and_gold(topic: str, good_df: DataFrame, batch_id: int) -> None:
                 col("event_ts").alias("order_ts"),
                 current_timestamp().alias("dw_loaded_at"),
             )
-            bq_append(fact_sales, f"{BQ_GOLD}.fact_sales", batch_id)
+            bq_append(fact_sales, f"{BQ_GOLD}.fact_sales_stream", batch_id)
 
     # ══════════════════════════════════════════════════════════════
     # TOPIC: ecommerce.inventory

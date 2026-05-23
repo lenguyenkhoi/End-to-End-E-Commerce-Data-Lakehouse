@@ -16,7 +16,7 @@ from pyspark.sql.functions import row_number
 # ENVIRONMENT & SPARK SESSION
 # ══════════════════════════════════════════════════════════════════
 GCP_KEY_PATH    = "/app/3_spark_processing/config/gcp_service_account.json"
-GCS_TEMP_BUCKET = "khoi-spark-temp"   # ← đổi thành tên GCS bucket thực tế
+GCS_TEMP_BUCKET = "khoi-spark-temp"  
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEY_PATH
 os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
 
