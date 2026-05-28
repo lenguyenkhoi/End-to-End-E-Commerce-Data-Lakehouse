@@ -91,6 +91,16 @@ streamlit_dashboard/
 ├── requirements.txt
 ├── config/
 │   └── gcp_service_account.json   ← your key (gitignored)
+├── shared/
+│     ├── bq.py
+│     ├── chart_helpers.py
+│     ├── config.py
+│     └── queries.py
+├── pages/
+│     ├── event_stream.py     ← Event Stream Dashboard Page
+│     ├── sales_dashboard.py  ← Sales Dashboard Page
+│     ├── forecasting.py      ← Forecast Dashboard Page
+│     └── ai_advisor.py       ← AI Advisor Page
 └── README.md
 ```
 
