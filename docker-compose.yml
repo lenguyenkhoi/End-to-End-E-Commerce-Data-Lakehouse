@@ -1,7 +1,4 @@
 services:
-  # ==========================================
-  # HẠ TẦNG GỐC (GIỮ NGUYÊN)
-  # ==========================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: ecom_zookeeper
@@ -11,6 +8,7 @@ services:
     networks:
       - ecom_network
 
+# kafka config
   kafka:
     image: confluentinc/cp-kafka:7.4.0
     container_name: ecom_kafka
@@ -27,7 +25,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     networks:
       - ecom_network
-
+# kafka ui config
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: ecom_kafka_ui
@@ -41,7 +39,7 @@ services:
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     networks:
       - ecom_network
-
+# postgres config
   postgres:
     image: postgres:15-alpine
     container_name: ecom_postgres
@@ -56,7 +54,7 @@ services:
       - ecom_postgres_data:/var/lib/postgresql/data
     networks:
       - ecom_network
-
+# streamlit app config
   ecommerce_web:
     build: ./1_streamlit_app
     container_name: ecom_web_app
@@ -76,9 +74,7 @@ services:
     networks:
       - ecom_network
 
-  # ==========================================
-  # SPARK STREAMING WORKER — ĐÃ SỬA
-  # ==========================================
+  # Spark streaming worker config
   spark_streaming_worker:
     build:
       context: ./3_spark_processing
@@ -92,17 +88,12 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: "/app/3_spark_processing/config/gcp_service_account.json"
     volumes:
       - ./:/app
-    # ──────────────────────────────────────────────────────────
-    # FIX CHÍNH: Bỏ --packages khỏi command
-    #
     # --packages trong docker-compose command OVERRIDE toàn bộ
     # spark.jars / spark.jars.packages đã set trong Python file.
     # Vì JARs đã được pre-bake vào image (trong Dockerfile),
     # spark-submit KHÔNG cần --packages nữa.
-    #
     # Kafka JAR vẫn giữ qua --packages vì nó không cần system
     # classloader — Spark's DataSource API tự quản lý nó.
-    # ──────────────────────────────────────────────────────────
     command: >
       spark-submit
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.spark:spark-avro_2.12:3.5.0
