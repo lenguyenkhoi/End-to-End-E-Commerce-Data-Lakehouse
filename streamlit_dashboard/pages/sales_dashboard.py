@@ -123,8 +123,8 @@ while True:
         row = df_bkpis.iloc[0]
         b_kpi_defs = [
             ("Total orders", f"{int(row.get('total_orders',0) or 0):,}", "💰",None),
-            ("Total revenue", f"${float(row.get('total_revenue',0) or 0)/1e6:.2f}M", "📊",None),
-            ("Avg order value", f"${float(row.get('avg_order_value',0) or 0):,.0f}", "📈",None),
+            ("Total revenue", f"{float(row.get('total_revenue',0) or 0)/1e9:.2f}B", "📊",None),
+            ("Avg order value", f"{float(row.get('avg_order_value',0) or 0):,.0f}", "📈",None),
             ("Avg margin", f"{float(row.get('avg_margin_pct',0) or 0):.1f}%", "📉",None),
             ("Unique customers", f"{int(row.get('unique_customers',0) or 0):,}", "👥",None),
         ]

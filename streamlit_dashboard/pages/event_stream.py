@@ -125,7 +125,7 @@ while True:
             val = round(random.uniform(-5.0, 15.0), 1)
             return f"{val}%" if val > 0 else f"{val}%"
         kpi_defs = [
-            ("Live Revenue",   f"${float(row.get('live_revenue',0) or 0)/1e6:.2f}M", "💰", mock_delta()),
+            ("Live Revenue",   f"{float(row.get('live_revenue',0) or 0)/1e9:.2f}B", "💰", mock_delta()),
             ("New orders",    f"{int(row.get('new_orders',0)):,}",    "🛒", mock_delta()),
             ("Paid orders",   f"{int(row.get('paid_orders',0)):,}",   "✅", mock_delta()),
             ("Cancellations", f"{int(row.get('cancellations',0)):,}", "❌", "-1.2%"), 

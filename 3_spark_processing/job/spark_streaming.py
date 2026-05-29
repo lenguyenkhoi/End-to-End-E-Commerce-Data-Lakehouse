@@ -42,11 +42,11 @@ GCS_JAR_FILENAME = f"gcs-connector-hadoop3-{GCS_JAR_VERSION}.jar"
 GCS_JAR_LOCAL    = f"/tmp/{GCS_JAR_FILENAME}"
 GCS_JAR_URL = f"https://storage.googleapis.com/hadoop-lib/gcs/{GCS_JAR_FILENAME}"
 if not os.path.exists(GCS_JAR_LOCAL):
-    print(f"📥 Downloading {GCS_JAR_FILENAME} → {GCS_JAR_LOCAL} ...")
+    print(f"Downloading {GCS_JAR_FILENAME} → {GCS_JAR_LOCAL} ...")
     urllib.request.urlretrieve(GCS_JAR_URL, GCS_JAR_LOCAL)
-    print("✅ Download complete")
+    print("Download complete")
 else:
-    print(f"✅ JAR already exists: {GCS_JAR_LOCAL}")
+    print(f"JAR already exists: {GCS_JAR_LOCAL}")
 
 BQ_CONNECTOR = "com.google.cloud.spark:spark-3.5-bigquery:0.37.0"
 
@@ -712,8 +712,8 @@ def _silver_and_gold(topic: str, good_df: DataFrame, batch_id: int) -> None:
         gold = sv.select(
             col("event_id"), col("event_type"),
             col("product_id"), col("product_name"), col("order_id"),
-            when(col("event_type") == "stock_updated_out",                 col("quantity_sold"))
-            .when(col("event_type") == "stock_updated_in",                 col("quantity_returned"))
+            when(col("event_type") == "stock_updated_out", col("quantity_sold"))
+            .when(col("event_type") == "stock_updated_in", col("quantity_returned"))
             .when(col("event_type").isin("restock_manual", "restock_auto"),col("quantity_added"))
             .otherwise(lit(None)).cast(IntegerType()).alias("quantity_changed"),
             when(col("event_type").isin("stock_updated_in",

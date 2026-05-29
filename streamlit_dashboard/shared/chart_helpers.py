@@ -9,6 +9,7 @@ PLOTLY_THEME = dict(
     plot_bgcolor  = "rgba(0,0,0,0)",
     font_color    = "#9ca3af",
     margin        = dict(l=0, r=0, t=28, b=0),
+    height        = 500,
 )
 
 
@@ -77,21 +78,51 @@ def fig_live_orders(df):
     fig.update_layout(legend=dict(orientation="h", y=1.1), **PLOTLY_THEME)
     return fig
 
+# def fig_stock_direction(df, title=""):
+#     fig = go.Figure()
+#     fig.add_trace(go.Bar(
+#         x=df["time_period"], y=df["stock_in"],
+#         name="Stock IN", marker_color="#3ecf8e"
+#     ))
+#     # Dữ liệu xuất kho là số âm nên thanh bar sẽ tự động chĩa xuống dưới
+#     fig.add_trace(go.Bar(
+#         x=df["time_period"], y=df["stock_out"],
+#         name="Stock OUT", marker_color="#ef5350"
+#     ))
+#     fig.update_layout(
+#         title=title,
+#         barmode="relative", # Quan trọng: Giúp bar âm/dương đối xứng nhau
+#         legend=dict(orientation="h", y=1.12),
+#         # height=550,
+#         **PLOTLY_THEME,
+#     )
+#     return fig
 def fig_stock_direction(df, title=""):
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df["time_period"], y=df["stock_in"],
         name="Stock IN", marker_color="#3ecf8e"
     ))
-    # Dữ liệu xuất kho là số âm nên thanh bar sẽ tự động chĩa xuống dưới
     fig.add_trace(go.Bar(
         x=df["time_period"], y=df["stock_out"],
         name="Stock OUT", marker_color="#ef5350"
     ))
+    
+    # CHIẾU CODE VÀO ĐÂY NÈ
     fig.update_layout(
         title=title,
-        barmode="relative", # Quan trọng: Giúp bar âm/dương đối xứng nhau
+        barmode="relative", 
         legend=dict(orientation="h", y=1.12),
+        
+        # 1. Ép trục X thành dạng Category để các cột to ra
+        xaxis=dict(
+            type='category', 
+            tickangle=-45 # Xoay nhãn thời gian nghiêng xíu cho dễ đọc
+        ),
+        
+        # 2. Điều chỉnh khoảng cách giữa các cột (0.1 = 10%)
+        bargap=0.1, 
+        
         **PLOTLY_THEME,
     )
     return fig
